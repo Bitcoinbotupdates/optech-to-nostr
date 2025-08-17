@@ -22,3 +22,6 @@ jobs:
         env:
           NOSTR_NSEC: ${{ secrets.NOSTR_NSEC }}
           RELAYS: ${{ vars.RELAYS }}
+          SINCE_DAYS: ${{ vars.SINCE_DAYS }}
+          MAX_PER_CAT: ${{ vars.MAX_PER_CAT }}
+          HASHTAGS: ${{ vars.HASHTAGS }}
