@@ -1,0 +1,23 @@
+name: Bitcoin Optech → Nostr
+on:
+  schedule:
+    - cron: '5 8 * * 1'   # Maandag 08:05 UTC ≈ 10:05 NL tijd
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Preview (dry run)
+        run: node index.mjs
+      - name: Post to Nostr
+        if: ${{ success() }}
+        run: node index.mjs --post
+        env:
+          NOSTR_NSEC: ${{ secrets.NOSTR_NSEC }}
+          RELAYS: ${{ vars.RELAYS }}
