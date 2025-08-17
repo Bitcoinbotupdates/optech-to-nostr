@@ -1,57 +1,124 @@
 import 'dotenv/config';
 import Parser from 'rss-parser';
-import WebSocket from 'ws';            // ✅ polyfill
-global.WebSocket = WebSocket;          // ✅ maak WebSocket beschikbaar voor nostr-tools
+import WebSocket from 'ws';               // ✅ polyfill for nostr-tools on Node/Actions
+global.WebSocket = WebSocket;
 
 import { nip19, getPublicKey, finalizeEvent, SimplePool } from 'nostr-tools';
 
-// === Config ===
-const FEED = 'https://bitcoinops.org/feed.xml'; // Bitcoin Optech weekly
-const RELAYS = (process.env.RELAYS || 'wss://relay.nostr.bg,wss://nostr.wine,wss://relay.wellorder.net,wss://nos.lol,wss://relay.snort.social')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
+// ======= CONFIG =======
+const RELAYS = (process.env.RELAYS || 'wss://relay.primal.net,wss://nos.lol,wss://relay.damus.io,wss://relay.nostr.bg,wss://nostr.wine,wss://relay.wellorder.net')
+  .split(',').map(s => s.trim()).filter(Boolean);
 
-function buildNote(item) {
-  const title = (item.title || 'Bitcoin Optech Newsletter').trim();
-  const link = (item.link || '').trim();
+const SINCE_DAYS = Number(process.env.SINCE_DAYS || 10);     // only include items newer than this
+const MAX_PER_CAT = Number(process.env.MAX_PER_CAT || 5);    // items per category
+const HASHTAGS = process.env.HASHTAGS || '#Bitcoin #Development #Lightning #Fedimint #Cashu';
+
+// Sources grouped by category (feel free to tweak later)
+const CATEGORIES = {
+  'Core Protocol': [
+    'https://bitcoinops.org/feed.xml',
+    'https://github.com/bitcoin/bitcoin/releases.atom'
+    // (Optional) commits: 'https://github.com/bitcoin/bitcoin/commits/master.atom'
+  ],
+  'Lightning & L2': [
+    'https://github.com/lightningnetwork/lnd/releases.atom',
+    'https://github.com/ElementsProject/lightning/releases.atom',
+    'https://github.com/lightningdevkit/rust-lightning/releases.atom',
+    'https://github.com/ACINQ/eclair/releases.atom',
+    'https://github.com/ACINQ/phoenix/releases.atom',
+    'https://blog.lightning.engineering/atom.xml'
+  ],
+  'Federated / Ecash': [
+    'https://github.com/fedimint/fedimint/releases.atom',
+    'https://github.com/cashubtc/nuts/releases.atom'
+  ],
+  'Use-cases & Adoption': [
+    'https://blog.breez.technology/rss.xml',
+    'https://blog.blockstream.com/rss/'
+  ]
+};
+// ======================
+
+const cutoff = new Date(Date.now() - SINCE_DAYS * 24 * 60 * 60 * 1000);
+
+const parser = new Parser();
+
+async function parseFeed(url) {
+  try {
+    const feed = await parser.parseURL(url);
+    return (feed?.items || []).map(i => {
+      const d = new Date(i.isoDate || i.pubDate || 0);
+      return {
+        title: (i.title || '').trim(),
+        link: (i.link || i.id || '').trim(),
+        date: isNaN(d) ? new Date(0) : d,
+        source: (i.link || url).replace(/^https?:\/\//,'').split('/')[0]
+      };
+    });
+  } catch (e) {
+    console.error('Feed error:', url, e.message);
+    return [];
+  }
+}
+
+function dedupe(items) {
+  const seen = new Set();
+  const out = [];
+  for (const it of items) {
+    if (!it.link) continue;
+    if (seen.has(it.link)) continue;
+    seen.add(it.link);
+    out.push(it);
+  }
+  return out;
+}
+
+function formatLines(items) {
   const lines = [];
-  lines.push('# Bitcoin Development Digest — via Bitcoin Optech');
-  lines.push('');
-  lines.push(`• Latest issue: ${title}`);
-  if (link) lines.push(`  ${link}`);
-  lines.push('');
-  lines.push('#Bitcoin #Development #Optech');
+  for (const it of items) {
+    const t = it.title.replace(/\s+/g, ' ').slice(0, 160);
+    lines.push(`• ${t}\n  ${it.link}`);
+  }
   return lines.join('\n');
 }
 
-async function fetchLatestOptech() {
-  const parser = new Parser();
-  const feed = await parser.parseURL(FEED);
-  const items = feed?.items || [];
-  items.sort((a,b) => new Date(b.isoDate || b.pubDate || 0) - new Date(a.isoDate || a.pubDate || 0));
-  return items[0] || null;
+function parentNoteText(summary) {
+  const date = new Date().toISOString().slice(0,10);
+  const lines = [];
+  lines.push(`# Bitcoin Development Digest — ${date}`);
+  lines.push('');
+  for (const [cat, count] of Object.entries(summary)) {
+    lines.push(`• ${cat}: ${count} update${count===1?'':'s'}`);
+  }
+  lines.push('');
+  lines.push(`Replies contain details per category.\n${HASHTAGS}`);
+  return lines.join('\n');
 }
 
-async function publish(content) {
-  const nsec = (process.env.NOSTR_NSEC || '').trim();
-  if (!nsec) throw new Error('Missing NOSTR_NSEC');
-  const { data: sk } = nip19.decode(nsec); // secret key bytes
-  const pk = getPublicKey(sk);
+function childNoteText(category, items) {
+  const lines = [];
+  lines.push(`## ${category}`);
+  lines.push('');
+  lines.push(formatLines(items));
+  lines.push('');
+  lines.push(HASHTAGS);
+  return lines.join('\n');
+}
 
+function sign(sk, content, tags = []) {
   const event = {
     kind: 1,
     created_at: Math.floor(Date.now() / 1000),
-    tags: [],
+    tags,
     content
   };
-  const signed = finalizeEvent(event, sk);
+  return finalizeEvent(event, sk); // adds id + sig
+}
 
-  const pool = new SimplePool({ getTimeout: 7000, getTimeoutInitial: 7000 }); // iets strakkere timeouts
-  const pubs = pool.publish(RELAYS, signed);
+async function publishEvent(event) {
+  const pool = new SimplePool({ getTimeout: 8000, getTimeoutInitial: 8000 });
+  const pubs = pool.publish(RELAYS, event);
   const results = await Promise.allSettled(pubs);
-
-  // 🔎 Log per-relay resultaat, superhandig bij debuggen:
   RELAYS.forEach((relay, i) => {
     const r = results[i];
     if (r?.status === 'fulfilled') {
@@ -60,22 +127,58 @@ async function publish(content) {
       console.log(`[ERR] ${relay} →`, r?.reason?.message || r?.reason || 'unknown error');
     }
   });
-
   const ok = results.some(r => r.status === 'fulfilled');
-  console.log('Published as npub:', nip19.npubEncode(pk));
   if (!ok) throw new Error('Publish failed on all relays');
 }
 
 async function main() {
-  const latest = await fetchLatestOptech();
-  if (!latest) { console.log('No feed items found'); return; }
-  const note = buildNote(latest);
-  console.log('\n--- NOTE PREVIEW ---\n');
-  console.log(note);
+  // Gather items per category
+  const grouped = {};
+  for (const [cat, urls] of Object.entries(CATEGORIES)) {
+    const all = (await Promise.all(urls.map(parseFeed))).flat();
+    const fresh = all.filter(i => i.date >= cutoff).sort((a,b) => b.date - a.date);
+    grouped[cat] = dedupe(fresh).slice(0, MAX_PER_CAT);
+  }
+
+  const totalPerCat = Object.fromEntries(Object.entries(grouped).map(([k,v]) => [k, v.length]));
+  const totalItems = Object.values(totalPerCat).reduce((a,b)=>a+b,0);
+
+  if (totalItems === 0) {
+    console.log('No recent items (try increasing SINCE_DAYS).');
+    return;
+  }
+
+  // Prepare keys
+  const nsec = (process.env.NOSTR_NSEC || '').trim();
+  if (!nsec) throw new Error('Missing NOSTR_NSEC');
+  const { data: sk } = nip19.decode(nsec);
+  const pk = getPublicKey(sk);
+
+  // Parent note
+  const parentText = parentNoteText(totalPerCat);
+  const parentEvent = sign(sk, parentText);
+  console.log('\n--- PARENT NOTE PREVIEW ---\n');
+  console.log(parentText, '\n');
   if (process.argv.includes('--post')) {
-    await publish(note);
+    await publishEvent(parentEvent);
+    console.log('Published parent as npub:', nip19.npubEncode(pk));
   } else {
-    console.log('\n(Dry run: not posted)');
+    console.log('(Dry run: parent not posted)');
+  }
+
+  // Child notes per category (only if items exist)
+  for (const [cat, items] of Object.entries(grouped)) {
+    if (!items.length) continue;
+    const childText = childNoteText(cat, items);
+    const tags = [['e', parentEvent.id, '', 'reply']]; // NIP-10 reply to parent
+    const childEvent = sign(sk, childText, tags);
+    console.log(`\n--- CHILD NOTE PREVIEW (${cat}) ---\n`);
+    console.log(childText, '\n');
+    if (process.argv.includes('--post')) {
+      await publishEvent(childEvent);
+    } else {
+      console.log(`(Dry run: child "${cat}" not posted)`);
+    }
   }
 }
 
