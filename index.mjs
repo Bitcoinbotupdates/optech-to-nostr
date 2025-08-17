@@ -1,10 +1,13 @@
 import 'dotenv/config';
 import Parser from 'rss-parser';
+import WebSocket from 'ws';            // ✅ polyfill
+global.WebSocket = WebSocket;          // ✅ maak WebSocket beschikbaar voor nostr-tools
+
 import { nip19, getPublicKey, finalizeEvent, SimplePool } from 'nostr-tools';
 
 // === Config ===
 const FEED = 'https://bitcoinops.org/feed.xml'; // Bitcoin Optech weekly
-const RELAYS = (process.env.RELAYS || 'wss://relay.damus.io,wss://relay.primal.net,wss://nos.lol,wss://relay.snort.social')
+const RELAYS = (process.env.RELAYS || 'wss://relay.nostr.bg,wss://nostr.wine,wss://relay.wellorder.net,wss://nos.lol,wss://relay.snort.social')
   .split(',')
   .map(s => s.trim())
   .filter(Boolean);
@@ -35,6 +38,7 @@ async function publish(content) {
   if (!nsec) throw new Error('Missing NOSTR_NSEC');
   const { data: sk } = nip19.decode(nsec); // secret key bytes
   const pk = getPublicKey(sk);
+
   const event = {
     kind: 1,
     created_at: Math.floor(Date.now() / 1000),
@@ -42,9 +46,21 @@ async function publish(content) {
     content
   };
   const signed = finalizeEvent(event, sk);
-  const pool = new SimplePool();
+
+  const pool = new SimplePool({ getTimeout: 7000, getTimeoutInitial: 7000 }); // iets strakkere timeouts
   const pubs = pool.publish(RELAYS, signed);
   const results = await Promise.allSettled(pubs);
+
+  // 🔎 Log per-relay resultaat, superhandig bij debuggen:
+  RELAYS.forEach((relay, i) => {
+    const r = results[i];
+    if (r?.status === 'fulfilled') {
+      console.log(`[OK]  ${relay}`);
+    } else {
+      console.log(`[ERR] ${relay} →`, r?.reason?.message || r?.reason || 'unknown error');
+    }
+  });
+
   const ok = results.some(r => r.status === 'fulfilled');
   console.log('Published as npub:', nip19.npubEncode(pk));
   if (!ok) throw new Error('Publish failed on all relays');
