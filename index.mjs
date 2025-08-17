@@ -9,38 +9,37 @@ import { nip19, getPublicKey, finalizeEvent, SimplePool } from 'nostr-tools';
 const RELAYS = (process.env.RELAYS || 'wss://relay.primal.net,wss://nos.lol,wss://relay.damus.io,wss://relay.nostr.bg,wss://nostr.wine,wss://relay.wellorder.net')
   .split(',').map(s => s.trim()).filter(Boolean);
 
-const SINCE_DAYS = Number(process.env.SINCE_DAYS || 10);     // only include items newer than this
-const MAX_PER_CAT = Number(process.env.MAX_PER_CAT || 5);    // items per category
+const SINCE_DAYS = Number(process.env.SINCE_DAYS || 7);      // ✅ weekly window by default
+const MAX_PER_CAT = Number(process.env.MAX_PER_CAT || 5);
 const HASHTAGS = process.env.HASHTAGS || '#Bitcoin #Development #Lightning #Fedimint #Cashu';
 
-// Sources grouped by category (feel free to tweak later)
+// Sources grouped by category (tweak later if you want)
 const CATEGORIES = {
   'Core Protocol': [
     'https://bitcoinops.org/feed.xml',
     'https://github.com/bitcoin/bitcoin/releases.atom'
-    // (Optional) commits: 'https://github.com/bitcoin/bitcoin/commits/master.atom'
+    // 'https://github.com/bitcoin/bitcoin/commits/master.atom' // optional
   ],
   'Lightning & L2': [
     'https://github.com/lightningnetwork/lnd/releases.atom',
     'https://github.com/ElementsProject/lightning/releases.atom',
     'https://github.com/lightningdevkit/rust-lightning/releases.atom',
     'https://github.com/ACINQ/eclair/releases.atom',
-    'https://github.com/ACINQ/phoenix/releases.atom',
-    'https://blog.lightning.engineering/atom.xml'
+    'https://github.com/ACINQ/phoenix/releases.atom'
+    // TEMP disabled: 'https://blog.lightning.engineering/atom.xml' // 404 right now
   ],
   'Federated / Ecash': [
     'https://github.com/fedimint/fedimint/releases.atom',
     'https://github.com/cashubtc/nuts/releases.atom'
   ],
   'Use-cases & Adoption': [
-    'https://blog.breez.technology/rss.xml',
     'https://blog.blockstream.com/rss/'
+    // TEMP disabled: 'https://breez.technology/blog/index.xml' // feed parse error currently
   ]
 };
 // ======================
 
 const cutoff = new Date(Date.now() - SINCE_DAYS * 24 * 60 * 60 * 1000);
-
 const parser = new Parser();
 
 async function parseFeed(url) {
@@ -83,9 +82,11 @@ function formatLines(items) {
 }
 
 function parentNoteText(summary) {
-  const date = new Date().toISOString().slice(0,10);
+  const end = new Date();
+  const start = new Date(end.getTime() - SINCE_DAYS * 24 * 60 * 60 * 1000);
+  const fmt = d => d.toISOString().slice(0,10);
   const lines = [];
-  lines.push(`# Bitcoin Development Digest — ${date}`);
+  lines.push(`# Bitcoin Development Digest — ${fmt(start)} → ${fmt(end)}`);
   lines.push('');
   for (const [cat, count] of Object.entries(summary)) {
     lines.push(`• ${cat}: ${count} update${count===1?'':'s'}`);
@@ -148,37 +149,40 @@ async function main() {
     return;
   }
 
-  // Prepare keys
+  // ----- PREVIEW (always works, without secrets) -----
+  const parentText = parentNoteText(totalPerCat);
+  console.log('\n--- PARENT NOTE PREVIEW ---\n');
+  console.log(parentText, '\n');
+  for (const [cat, items] of Object.entries(grouped)) {
+    if (!items.length) continue;
+    const childText = childNoteText(cat, items);
+    console.log(`\n--- CHILD NOTE PREVIEW (${cat}) ---\n`);
+    console.log(childText, '\n');
+  }
+
+  // ----- POST ONLY IF --post -----
+  if (!process.argv.includes('--post')) {
+    console.log('(Dry run: not posting)');
+    return;
+  }
+
   const nsec = (process.env.NOSTR_NSEC || '').trim();
   if (!nsec) throw new Error('Missing NOSTR_NSEC');
   const { data: sk } = nip19.decode(nsec);
   const pk = getPublicKey(sk);
 
   // Parent note
-  const parentText = parentNoteText(totalPerCat);
   const parentEvent = sign(sk, parentText);
-  console.log('\n--- PARENT NOTE PREVIEW ---\n');
-  console.log(parentText, '\n');
-  if (process.argv.includes('--post')) {
-    await publishEvent(parentEvent);
-    console.log('Published parent as npub:', nip19.npubEncode(pk));
-  } else {
-    console.log('(Dry run: parent not posted)');
-  }
+  await publishEvent(parentEvent);
+  console.log('Published parent as npub:', nip19.npubEncode(pk));
 
-  // Child notes per category (only if items exist)
+  // Child notes per category (reply to parent)
   for (const [cat, items] of Object.entries(grouped)) {
     if (!items.length) continue;
     const childText = childNoteText(cat, items);
-    const tags = [['e', parentEvent.id, '', 'reply']]; // NIP-10 reply to parent
+    const tags = [['e', parentEvent.id, '', 'reply']]; // NIP-10 reply
     const childEvent = sign(sk, childText, tags);
-    console.log(`\n--- CHILD NOTE PREVIEW (${cat}) ---\n`);
-    console.log(childText, '\n');
-    if (process.argv.includes('--post')) {
-      await publishEvent(childEvent);
-    } else {
-      console.log(`(Dry run: child "${cat}" not posted)`);
-    }
+    await publishEvent(childEvent);
   }
 }
 
