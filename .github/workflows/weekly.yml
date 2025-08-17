@@ -1,27 +1,46 @@
 name: Bitcoin Optech → Nostr
 on:
   schedule:
-    - cron: '5 8 * * 1'   # Maandag 08:05 UTC ≈ 10:05 NL tijd
+    # Maanden 3–10 (ongeveer CEST, zomertijd): 07:00 UTC ≈ 09:00 NL
+    - cron: '0 7 * 3-10 1'
+    # Maanden 11,12,1,2 (ongeveer CET, wintertijd): 08:00 UTC ≈ 09:00 NL
+    - cron: '0 8 * 11,12,1,2 1'
   workflow_dispatch: {}
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    env:
+      # Repo variables (instellen via Settings → Secrets and variables → Actions → Variables)
+      RELAYS: ${{ vars.RELAYS }}
+      SINCE_DAYS: ${{ vars.SINCE_DAYS }}
+      MAX_PER_CAT: ${{ vars.MAX_PER_CAT }}
+      TOP_HIGHLIGHTS: ${{ vars.TOP_HIGHLIGHTS }}
+      MAX_SUMMARY_CH: ${{ vars.MAX_SUMMARY_CH }}
+      HASHTAGS: ${{ vars.HASHTAGS }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+
       - name: Install dependencies
         run: npm install
+
+      - name: Show config
+        run: |
+          echo "RELAYS=$RELAYS"
+          echo "SINCE_DAYS=$SINCE_DAYS"
+          echo "MAX_PER_CAT=$MAX_PER_CAT"
+          echo "TOP_HIGHLIGHTS=$TOP_HIGHLIGHTS"
+          echo "MAX_SUMMARY_CH=$MAX_SUMMARY_CH"
+          echo "HASHTAGS=$HASHTAGS"
+
       - name: Preview (dry run)
         run: node index.mjs
+
       - name: Post to Nostr
         if: ${{ success() }}
         run: node index.mjs --post
         env:
-          NOSTR_NSEC: ${{ secrets.NOSTR_NSEC }}
-          RELAYS: ${{ vars.RELAYS }}
-          SINCE_DAYS: ${{ vars.SINCE_DAYS }}
-          MAX_PER_CAT: ${{ vars.MAX_PER_CAT }}
-          HASHTAGS: ${{ vars.HASHTAGS }}
+          NOSTR_NSEC: ${{ secrets.NOSTR_NSEC }}   # alleen hier injecten, niet eerder
