@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import Parser from 'rss-parser';
-import WebSocket from 'ws';               // ✅ polyfill for nostr-tools on Node/Actions
+import WebSocket from 'ws';            // ✅ polyfill for nostr-tools on Node/Actions
 global.WebSocket = WebSocket;
 
 import { nip19, getPublicKey, finalizeEvent, SimplePool } from 'nostr-tools';
@@ -9,16 +9,18 @@ import { nip19, getPublicKey, finalizeEvent, SimplePool } from 'nostr-tools';
 const RELAYS = (process.env.RELAYS || 'wss://relay.primal.net,wss://nos.lol,wss://relay.damus.io,wss://relay.nostr.bg,wss://nostr.wine,wss://relay.wellorder.net')
   .split(',').map(s => s.trim()).filter(Boolean);
 
-const SINCE_DAYS = Number(process.env.SINCE_DAYS || 7);      // ✅ weekly window by default
-const MAX_PER_CAT = Number(process.env.MAX_PER_CAT || 5);
-const HASHTAGS = process.env.HASHTAGS || '#Bitcoin #Development #Lightning #Fedimint #Cashu';
+const SINCE_DAYS      = Number(process.env.SINCE_DAYS || 7);      // weekly window
+const MAX_PER_CAT     = Number(process.env.MAX_PER_CAT || 5);     // items per category
+const TOP_HIGHLIGHTS  = Number(process.env.TOP_HIGHLIGHTS || 3);  // parent: top N items
+const MAX_SUMMARY_CH  = Number(process.env.MAX_SUMMARY_CH || 140);
+const HASHTAGS        = process.env.HASHTAGS || '#Bitcoin #Development #Lightning #Fedimint #Cashu';
 
 // Sources grouped by category (tweak later if you want)
 const CATEGORIES = {
   'Core Protocol': [
     'https://bitcoinops.org/feed.xml',
     'https://github.com/bitcoin/bitcoin/releases.atom'
-    // 'https://github.com/bitcoin/bitcoin/commits/master.atom' // optional
+    // 'https://github.com/bitcoin/bitcoin/commits/master.atom'
   ],
   'Lightning & L2': [
     'https://github.com/lightningnetwork/lnd/releases.atom',
@@ -26,7 +28,7 @@ const CATEGORIES = {
     'https://github.com/lightningdevkit/rust-lightning/releases.atom',
     'https://github.com/ACINQ/eclair/releases.atom',
     'https://github.com/ACINQ/phoenix/releases.atom'
-    // TEMP disabled: 'https://blog.lightning.engineering/atom.xml' // 404 right now
+    // TEMP disabled: 'https://blog.lightning.engineering/atom.xml'
   ],
   'Federated / Ecash': [
     'https://github.com/fedimint/fedimint/releases.atom',
@@ -34,13 +36,41 @@ const CATEGORIES = {
   ],
   'Use-cases & Adoption': [
     'https://blog.blockstream.com/rss/'
-    // TEMP disabled: 'https://breez.technology/blog/index.xml' // feed parse error currently
+    // TEMP disabled: 'https://breez.technology/blog/index.xml'
   ]
 };
 // ======================
 
 const cutoff = new Date(Date.now() - SINCE_DAYS * 24 * 60 * 60 * 1000);
 const parser = new Parser();
+
+// ---------- Helpers ----------
+function stripHtml(s='') { return s.replace(/<[^>]*>/g, ' ').replace(/\s+/g,' ').trim(); }
+function snip(s='', n=MAX_SUMMARY_CH) { return s.length <= n ? s : s.slice(0, n-1) + '…'; }
+
+function whyMattersHint(item, cat) {
+  const t = (item.title || '').toLowerCase();
+  if (/release|tag v?\d|\bv\d/i.test(t)) return 'new release';
+  if (/\bbip\b|proposal|merged|policy/.test(t)) return 'core proposal/change';
+  if (/splicing|dual[- ]funding|anchor|gossip|trampoline|amp|wumbo|taproot/.test(t)) return 'LN feature/update';
+  if (cat === 'Federated / Ecash') return 'ecash/federated update';
+  if (cat === 'Use-cases & Adoption') return 'adoption/use-case';
+  return '';
+}
+
+function scoreItem(item, cat) {
+  let s = 0;
+  const t = (item.title || '').toLowerCase();
+  if (/release|tag v?\d|\bv\d/.test(t)) s += 3;
+  if (/\bbip\b|proposal|merged|policy/.test(t)) s += 3;
+  if (cat === 'Core Protocol') s += 2;
+  if (cat === 'Lightning & L2') s += 1;
+  // fresher = slightly higher
+  const ageDays = (Date.now() - item.date.getTime()) / 864e5;
+  s += Math.max(0, 2 - ageDays/3);
+  return s;
+}
+// ------------------------------
 
 async function parseFeed(url) {
   try {
@@ -51,7 +81,8 @@ async function parseFeed(url) {
         title: (i.title || '').trim(),
         link: (i.link || i.id || '').trim(),
         date: isNaN(d) ? new Date(0) : d,
-        source: (i.link || url).replace(/^https?:\/\//,'').split('/')[0]
+        source: (i.link || url).replace(/^https?:\/\//,'').split('/')[0],
+        summary: stripHtml(i.contentSnippet || i.summary || i.content || '')
       };
     });
   } catch (e) {
@@ -72,21 +103,25 @@ function dedupe(items) {
   return out;
 }
 
-function formatLines(items) {
-  const lines = [];
-  for (const it of items) {
-    const t = it.title.replace(/\s+/g, ' ').slice(0, 160);
-    lines.push(`• ${t}\n  ${it.link}`);
-  }
-  return lines.join('\n');
+function formatItemLine(item, cat) {
+  const hint = whyMattersHint(item, cat);
+  const extra = item.summary ? ` — ${snip(item.summary)}` : '';
+  const why  = hint ? ` (${hint})` : '';
+  return `• ${item.title}\n  ${item.link}${extra}${why}`;
 }
 
-function parentNoteText(summary) {
+function parentNoteText(summary, highlights) {
   const end = new Date();
   const start = new Date(end.getTime() - SINCE_DAYS * 24 * 60 * 60 * 1000);
   const fmt = d => d.toISOString().slice(0,10);
   const lines = [];
   lines.push(`# Bitcoin Development Digest — ${fmt(start)} → ${fmt(end)}`);
+  lines.push('');
+  lines.push('Top highlights:');
+  for (const h of highlights) {
+    const hint = whyMattersHint(h.item, h.cat);
+    lines.push(`• ${h.item.title} — ${h.item.link}${hint ? ` (${hint})` : ''}`);
+  }
   lines.push('');
   for (const [cat, count] of Object.entries(summary)) {
     lines.push(`• ${cat}: ${count} update${count===1?'':'s'}`);
@@ -100,7 +135,7 @@ function childNoteText(category, items) {
   const lines = [];
   lines.push(`## ${category}`);
   lines.push('');
-  lines.push(formatLines(items));
+  for (const it of items) lines.push(formatItemLine(it, category));
   lines.push('');
   lines.push(HASHTAGS);
   return lines.join('\n');
@@ -113,7 +148,7 @@ function sign(sk, content, tags = []) {
     tags,
     content
   };
-  return finalizeEvent(event, sk); // adds id + sig
+  return finalizeEvent(event, sk);
 }
 
 async function publishEvent(event) {
@@ -143,16 +178,21 @@ async function main() {
 
   const totalPerCat = Object.fromEntries(Object.entries(grouped).map(([k,v]) => [k, v.length]));
   const totalItems = Object.values(totalPerCat).reduce((a,b)=>a+b,0);
+  if (totalItems === 0) { console.log('No recent items (try increasing SINCE_DAYS).'); return; }
 
-  if (totalItems === 0) {
-    console.log('No recent items (try increasing SINCE_DAYS).');
-    return;
+  // Build highlights pool
+  const pool = [];
+  for (const [cat, arr] of Object.entries(grouped)) {
+    for (const item of arr) pool.push({ item, cat, score: scoreItem(item, cat) });
   }
+  pool.sort((a,b) => b.score - a.score);
+  const highlights = pool.slice(0, Math.min(TOP_HIGHLIGHTS, pool.length));
 
-  // ----- PREVIEW (always works, without secrets) -----
-  const parentText = parentNoteText(totalPerCat);
+  // ----- PREVIEW (no secrets needed) -----
+  const parentText = parentNoteText(totalPerCat, highlights);
   console.log('\n--- PARENT NOTE PREVIEW ---\n');
   console.log(parentText, '\n');
+
   for (const [cat, items] of Object.entries(grouped)) {
     if (!items.length) continue;
     const childText = childNoteText(cat, items);
@@ -171,12 +211,12 @@ async function main() {
   const { data: sk } = nip19.decode(nsec);
   const pk = getPublicKey(sk);
 
-  // Parent note
+  // Parent
   const parentEvent = sign(sk, parentText);
   await publishEvent(parentEvent);
   console.log('Published parent as npub:', nip19.npubEncode(pk));
 
-  // Child notes per category (reply to parent)
+  // Children (reply to parent)
   for (const [cat, items] of Object.entries(grouped)) {
     if (!items.length) continue;
     const childText = childNoteText(cat, items);
