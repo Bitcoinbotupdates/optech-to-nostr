@@ -12,7 +12,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm ci
+      - name: Install dependencies
+        run: npm install
       - name: Preview (dry run)
         run: node index.mjs
       - name: Post to Nostr
