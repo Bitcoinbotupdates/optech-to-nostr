@@ -1,6 +1,6 @@
 {
   "name": "optech-nostr-bot",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "scripts": {
     "start": "node index.mjs",
@@ -9,6 +9,7 @@
   "dependencies": {
     "nostr-tools": "^2.7.2",
     "rss-parser": "^3.13.0",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "ws": "^8.18.0"
   }
 }
